@@ -154,8 +154,58 @@ async function startServer() {
     ('cap5', 'Talent Acquisition', 'HR', 2);
   `);
 
+  // --- Health Check Endpoints ---
+  
+  // Helper: event-loop responsiveness
+  function isEventLoopResponsive(thresholdMs = 40) {
+    const start = process.hrtime.bigint();
+    return new Promise((resolve) => {
+      setImmediate(() => {
+        const diffMs = Number(process.hrtime.bigint() - start) / 1e6;
+        resolve(diffMs < thresholdMs);
+      });
+    });
+  }
+
+  app.get("/health/live", async (req, res) => {
+    const ok = await isEventLoopResponsive();
+    if (!ok) return res.status(500).json({ status: "fail", uptime_seconds: process.uptime() });
+    return res.status(200).json({ status: "ok", uptime_seconds: process.uptime() });
+  });
+
+  app.get("/health/ready", async (req, res) => {
+    const start = Date.now();
+    try {
+      // Single quick DB probe
+      const r = await db.get("SELECT 1");
+      if (!r) throw new Error("db-probe-failed");
+      
+      const latency = Date.now() - start;
+      if (latency > 50) {
+        return res.status(503).json({ 
+          status: "degraded", 
+          db: "connected", 
+          uptime_seconds: process.uptime(), 
+          latency_ms: latency 
+        });
+      }
+      return res.status(200).json({ 
+        status: "ok", 
+        db: "connected", 
+        uptime_seconds: process.uptime(), 
+        latency_ms: latency, 
+        version: process.env.APP_VERSION || "unknown" 
+      });
+    } catch (err: any) {
+      return res.status(503).json({ status: "fail", db: "down", error: err.message });
+    }
+  });
+
+  app.get("/health", (req, res) => res.redirect(307, "/health/ready"));
+
   // Auth Middleware
   const authMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.path.startsWith("/health")) return next();
     if (req.path === "/api/auth/login") return next();
     if (!req.path.startsWith("/api/")) return next();
     
